@@ -9,8 +9,8 @@ from pathlib import Path
 import json
 
 
-output_dir = Path("capacity_data")
-symbol_file = Path("symbols_UNS.json")
+output_dir = Path("capacity_data_VVS")
+symbol_file = Path("symbols_VVS.json")
 output_dir.mkdir(exist_ok=True, parents=True)
 
 
@@ -28,7 +28,7 @@ q2 = 'depth_table = loadTable("dfs://tick_depth", "depths")'
 s.run(q1)
 s.run(q2)
 
-start_date, end_date = "2022-03-01", "2022-05-25"
+start_date, end_date = "2022-05-21", "2022-05-30"
 
 with open(symbol_file, 'r') as f:
     symbols = json.load(f)
@@ -197,14 +197,14 @@ def get_data_date(sym: str, hedge: str, side: str, delay: int, start: str, end: 
                 cross_ext = hedge_ext
                 if cross.startswith("BNB") or cross.startswith("BUSD"):
                     cross_ext = "BNC"
-                print(f"{sym} and {hedge} using crossing pair {cross}.{cross_ext}")
+                print(f"{sym} and {hedge} using crossing pair {cross}.{cross_ext}, side {side}, price type {opposite_price_type}")
                 s.run("cross_tbl = select timestamp, {} as price from depth_table where symbol='{}', timestamp>={}, timestamp<{};".format(
                     opposite_price_type+'1', cross + '.' + cross_ext,  start, end))
             else:
                 reverse_cross_ext = hedge_ext
                 if reverse_cross.startswith("BNB") or reverse_cross.startswith("BUSD"):
                     reverse_cross_ext = "BNC"
-                print(f"{sym} and {hedge} using reverse crossing pair {reverse_cross}.{reverse_cross_ext}")
+                print(f"{sym} and {hedge} using reverse crossing pair {reverse_cross}.{reverse_cross_ext}, side {side} price type 1 / {price_type}")
                 s.run("cross_tbl = select timestamp, {} as price from depth_table where symbol='{}', timestamp>={}, timestamp<{};".format(
                     f"1.0 / {price_type}1", reverse_cross + '.' + reverse_cross_ext, start, end))
             s.run("t1 = wj(t1, cross_tbl, 0s:120s, <first(price) as price>, `timestamp)");
@@ -248,6 +248,7 @@ def buy_match(exch, fee, n_levels, x):
         tot -= vol
 
     if exch in bps_exchanges:
+        print(f"bps exchange {exch}")
         fee = res * fee / 1e4
 
     if pnl < fee:
@@ -271,6 +272,7 @@ def sell_match(exch, fee, n_levels, x):
         tot -= vol
 
     if exch in bps_exchanges:
+        print(f"bps exchange {exch}")
         fee = res * fee / 1e4
 
     if pnl < fee:
