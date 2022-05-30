@@ -28,7 +28,7 @@ q2 = 'depth_table = loadTable("dfs://tick_depth", "depths")'
 s.run(q1)
 s.run(q2)
 
-start_date, end_date = "2022-05-20", "2022-06-01"
+start_date, end_date = "2022-05-21", "2022-06-01"
 
 with open(symbol_file, 'r') as f:
     symbols = json.load(f)
@@ -237,8 +237,8 @@ def get_data(sym: str, hedge: str, side: str, delay: int, starts: List, ends: Li
 def buy_match(exch, fee, n_levels, x):
     res, pnl = 0, 0
     tot = x["volume"]
+    price = x["vwap"] * x["price"]
     for i in range(1, n_levels + 1):
-        price = x["vwap"] * x["price"]
         if not x[f"a{i}"] > 0 or price < x[f"a{i}"] or tot <= 0:
             break
 
@@ -261,8 +261,8 @@ def buy_match(exch, fee, n_levels, x):
 def sell_match(exch, fee, n_levels, x):
     res, pnl = 0, 0
     tot = x["volume"]
+    price = x["vwap"] * x["price"]
     for i in range(1, n_levels + 1):
-        price = x["vwap"] * x["price"]
         if not x[f"b{i}"] > 0 or price > x[f"b{i}"] or tot <= 0:
             break
 
