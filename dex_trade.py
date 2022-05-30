@@ -9,8 +9,8 @@ from pathlib import Path
 import json
 
 
-output_dir = Path("capacity_data_VVS")
-symbol_file = Path("symbols_VVS.json")
+output_dir = Path("capacity_data_UNS")
+symbol_file = Path("symbols_UNS.json")
 output_dir.mkdir(exist_ok=True, parents=True)
 
 
@@ -28,7 +28,7 @@ q2 = 'depth_table = loadTable("dfs://tick_depth", "depths")'
 s.run(q1)
 s.run(q2)
 
-start_date, end_date = "2022-05-21", "2022-05-30"
+start_date, end_date = "2022-05-20", "2022-06-01"
 
 with open(symbol_file, 'r') as f:
     symbols = json.load(f)
