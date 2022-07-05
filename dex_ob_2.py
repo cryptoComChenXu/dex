@@ -12,6 +12,8 @@ from copy import deepcopy
 import re, argparse, pytz, logging, logging.handlers
 import dolphindb as ddb 
 from collections import defaultdict
+import boto3
+from botocore.exceptions import ClientError
 
 pd.set_option("display.float_format", "{:.10f}".format)
 
@@ -73,8 +75,6 @@ def get_data_date(sym: str, param: Dict, side: str, start: str, end: str, delay:
     symbol_reverse = param["symbol_reverse"]
     symbol_adjust_reverse = param["symbol_adjust_reverse"]
     hedge_adjust_reverse = param["hedge_adjust_reverse"]
-
-    logger.info(f"Getting data for quote {sym}, hedge {hedge} ...")
 
     oppo_side = 'a' if side == 'b' else 'b'
 
@@ -234,9 +234,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="DEX", description="",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--rootdir", nargs="?", type=str, default=".", dest="rootdir", help="")
-    parser.add_argument("--symbolfilename", nargs="?", type=str, default="symbols_ob_UNS.json", dest="symbolfilename", help="")
-    parser.add_argument("--start", nargs="?", type=str, default="2022-06-30", dest="start", help="")
-    parser.add_argument("--end", nargs="?", type=str, default="2022-07-02", dest="end", help="")
+    parser.add_argument("--s3_bucket", nargs="?", type=str, default="xdev-sg-trading-desk-quant-data", dest="s3_bucket", help="")
+    parser.add_argument("--s3_folder", nargs="?", type=str, default="sim_dex_ob", dest="s3_folder", help="")
+    parser.add_argument("--symbolfilename", nargs="?", type=str, default="symbols_ob_PCS.json", dest="symbolfilename", help="")
+    parser.add_argument("--start", nargs="?", type=str, default="2022-07-03", dest="start", help="")
+    parser.add_argument("--end", nargs="?", type=str, default="2022-07-05", dest="end", help="")
     parser.add_argument("--blocktimedelay", nargs="?", type=int, default=1, dest="blocktimedelay", help="")
 
     args = parser.parse_args()
@@ -264,7 +266,13 @@ if __name__ == "__main__":
     q2 = 'depth_table = loadTable("dfs://tick_depth", "depths")'
     s.run(q2)
 
-    starts, ends = calc_dates(args.start, args.end)
+    start_date, end_date = args.start, args.end
+    if start_date == "":
+        now = datetime.now()
+        start_date = (now - timedelta(days=2)).strftime("%Y-%m-%d")
+        end_date = now.strftime("%Y-%m-%d")
+
+    starts, ends = calc_dates(start_date, end_date)
 
     trades = []
 
@@ -277,7 +285,9 @@ if __name__ == "__main__":
             data_L, data_S = [], []
             for i in range(len(starts)):
                 start, end = starts[i], ends[i]
+                logger.info(f"Getting long {sym} data from {start}, {end} ...")
                 df_L = get_data_date(sym, param, 'a', start, end, 5, 20, logger)
+                logger.info(f"Getting short {sym} data from {start}, {end} ...")
                 df_S = get_data_date(sym, param, 'b', start, end, 5, 20, logger)
 
                 if not df_L.empty: data_L.append(df_L)
@@ -307,7 +317,7 @@ if __name__ == "__main__":
                     df_L_trade["symbol"] = sym.replace('-', '')
                     df_L_trade["hedge"] = param["hedge"].replace('-', '')
 
-                    trades.append(df_L_trade[["timestamp", "symbol", "hedge", "trade_ntl", "trade_pnl", "fees", "net_margin"]])
+                    trades.append(df_L_trade[["timestamp", "symbol", "hedge", "trade_ntl", "trade_pnl", "fees", "net_margin", "triggertime", "a1", "av1", "b1", "bv1"]])
                 else:
                     logger.error("No L trigger for symbol {}, hedge {}.".format(sym, param["hedge"]))
             else:
@@ -338,7 +348,7 @@ if __name__ == "__main__":
                     df_S_trade["symbol"] = sym.replace('-', '')
                     df_S_trade["hedge"] = param["hedge"].replace('-', '')
 
-                    trades.append(df_S_trade[["timestamp", "symbol", "hedge", "trade_ntl", "trade_pnl", "fees", "net_margin"]])
+                    trades.append(df_S_trade[["timestamp", "symbol", "hedge", "trade_ntl", "trade_pnl", "fees", "net_margin", "triggertime", "a1", "av1", "b1", "bv1"]])
                 else:
                     logger.error("No S trigger for symbol {}, hedge {}.".format(sym, param["hedge"]))
             else:
@@ -346,6 +356,12 @@ if __name__ == "__main__":
 
     if len(trades) > 0:
         df = pd.concat(trades)
+
+        symbolfilename, _ = args.symbolfilename.split('.')
+        tradefilename = "Sim_trades_{}_{}-{}.csv".format(
+            symbolfilename, start_date.replace('-', ''), end_date.replace('-', ''))
+        df.to_csv(rootdir / tradefilename, index=False)
+
         df["date"] = df["timestamp"].dt.strftime("%Y-%m-%d")
 
         df_res = df.groupby(["date", "symbol", "hedge"]).agg(
@@ -363,7 +379,30 @@ if __name__ == "__main__":
         df_res["winRatio"] = df_res["winTrades"].div(df_res["trade"]) * 100.
 
 
-        symbolfilename, _ = args.symbolfilename.split('.')
-        outputfilename = "Sim_{}_{}-{}.csv".format(
-            symbolfilename, args.start.replace('-', ''), args.end.replace('-', ''))
-        df_res.to_csv(rootdir / outputfilename, index=True)
+        summaryfilename = "Sim_summary_{}_{}-{}.csv".format(
+            symbolfilename, start_date.replace('-', ''), end_date.replace('-', ''))
+        df_res.to_csv(rootdir / summaryfilename, index=True)
+
+
+        s3_client = boto3.client("s3")
+        key = args.s3_folder + '/' + tradefilename
+        try:
+            response = s3_client.upload_file(str(rootdir / tradefilename), args.s3_bucket, key)
+        except ClientError as e:
+            logger.error(f"Couldn't upload {tradefilename}, {e}")
+            sys.exit(1)
+        except FileNotFoundError as e:
+            logger.error(e)
+            sys.exit(1)
+
+        key = args.s3_folder + '/' + summaryfilename
+        try:
+            response = s3_client.upload_file(str(rootdir / summaryfilename), args.s3_bucket, key)
+        except ClientError as e:
+            logger.error(f"Couldn't upload {summaryfilename}, {e}")
+            sys.exit(1)
+        except FileNotFoundError as e:
+            logger.error(e)
+            sys.exit(1)
+
+        sys.exit(0)
