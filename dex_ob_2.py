@@ -234,19 +234,25 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="DEX", description="",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--rootdir", nargs="?", type=str, default=".", dest="rootdir", help="")
+    parser.add_argument("--outputdir", nargs="?", type=str, default="G://My Drive/DEX-Arb/Chen", dest="outputdir", help="")
     parser.add_argument("--s3_bucket", nargs="?", type=str, default="xdev-sg-trading-desk-quant-data", dest="s3_bucket", help="")
     parser.add_argument("--s3_folder", nargs="?", type=str, default="sim_dex_ob", dest="s3_folder", help="")
-    parser.add_argument("--symbolfilename", nargs="?", type=str, default="symbols_ob_PCS.json", dest="symbolfilename", help="")
+    parser.add_argument("--exchanges", nargs="?", type=str, default="ht13", dest="exchanges", help="")
     parser.add_argument("--start", nargs="?", type=str, default="2022-07-03", dest="start", help="")
     parser.add_argument("--end", nargs="?", type=str, default="2022-07-05", dest="end", help="")
     parser.add_argument("--blocktimedelay", nargs="?", type=int, default=1, dest="blocktimedelay", help="")
+    parser.add_argument("--ratelimit", nargs="?", type=int, default=0, dest="ratelimit", help="limit the trades in n seconds")
+    parser.add_argument("--trigger_margin", nargs="?", type=int, default=5, dest="trigger_margin", help="")
+    parser.add_argument("--upload", action="store_true", dest="upload", help="")
+    parser.add_argument("--eod", action="store_true", dest="eod", help="")
 
     args = parser.parse_args()
 
     logger = setup_logger("DEX")
     rootdir = Path(args.rootdir)
+    outputdir = Path(args.outputdir)
 
-    with open(rootdir / args.symbolfilename) as f:
+    with open(rootdir / f"{args.exchanges}_symbols.json") as f:
         symbols = json.load(f)
 
     with open(rootdir / "db_config_defi.json", 'r') as f:
@@ -266,13 +272,19 @@ if __name__ == "__main__":
     q2 = 'depth_table = loadTable("dfs://tick_depth", "depths")'
     s.run(q2)
 
-    start_date, end_date = args.start, args.end
-    if start_date == "":
-        now = datetime.now()
-        start_date = (now - timedelta(days=2)).strftime("%Y-%m-%d")
-        end_date = now.strftime("%Y-%m-%d")
+    now = datetime.utcnow()
+    prev_time = now - timedelta(hours=1)
+    start_date = prev_time.strftime("%Y-%m-%dT%H")
+    end_date = now.strftime("%Y-%m-%dT%H")
+    starts, ends = [start_date.replace('-', '.') + ":00:00"], [end_date.replace('-', '.') + ":00:00"]
 
-    starts, ends = calc_dates(start_date, end_date)
+    if args.eod:
+        start_date, end_date = args.start, args.end
+        if start_date == "":
+            start_date = (now - timedelta(days=2)).strftime("%Y-%m-%d")
+            end_date = now.strftime("%Y-%m-%d")
+
+        starts, ends = calc_dates(start_date, end_date)
 
     trades = []
 
@@ -280,7 +292,7 @@ if __name__ == "__main__":
         for sym, param in symbol.items():
             _, dex = sym.split('.')
 
-            min_ntl, max_ntl, entry = get_thresholds(df_thresholds, sym.replace('-', ''), param["hedge"].replace('-', ''))
+            # min_ntl, max_ntl, entry = get_thresholds(df_thresholds, sym.replace('-', ''), param["hedge"].replace('-', ''))
             
             data_L, data_S = [], []
             for i in range(len(starts)):
@@ -295,12 +307,14 @@ if __name__ == "__main__":
 
             if len(data_L) > 0:
                 df_L = pd.concat(data_L)
-                match_func = partial(ask_match, max_ntl, 20)
+                # match_func = partial(ask_match, max_ntl * 5 if args.ratelimit > 0 else max_ntl, 20)
+                match_func = partial(ask_match, float("inf"), 20)
                 match_L = df_L.apply(match_func, axis=1)
                 df_L["trigger_ntl"] = match_L.str[0]
                 df_L["trigger_pnl"] = match_L.str[1]
-                df_L["trigger_bps"] = df_L["trigger_pnl"].div(df_L["trigger_ntl"]) * 1e4
-                df_L_trigger = df_L.loc[(df_L.trigger_ntl >= min_ntl) & (df_L.trigger_bps >= entry)]
+                df_L["trigger_fees"] = df_L["trigger_ntl"] * bps_gas_fees[dex] / 1e4 + dollar_gas_fees[dex]
+                df_L["trigger_margin"] = (df_L["trigger_pnl"] - df_L["trigger_fees"]).div(df_L["trigger_ntl"]) * 1e4
+                df_L_trigger = df_L.loc[df_L.trigger_margin >= args.trigger_margin]
 
                 if not df_L_trigger.empty:
                     df_L_trigger.rename(columns={"timestamp": "triggertime"}, inplace=True)
@@ -317,6 +331,14 @@ if __name__ == "__main__":
                     df_L_trade["symbol"] = sym.replace('-', '')
                     df_L_trade["hedge"] = param["hedge"].replace('-', '')
 
+                    if args.ratelimit > 0:
+                        df_L_trade.set_index("timestamp", inplace=True)
+                        trade_interval = int(blocktimes[dex] * args.ratelimit)
+                        indices = df_L_trade["trade_ntl"].resample(f"{trade_interval}s").agg(lambda x: np.nan if x.count() == 0 else x.idxmax()).values
+                        indices = indices[~pd.isnull(indices)]
+                        df_L_trade = df_L_trade.loc[indices]
+                        df_L_trade.reset_index(inplace=True)
+
                     trades.append(df_L_trade[["timestamp", "symbol", "hedge", "trade_ntl", "trade_pnl", "fees", "net_margin", "triggertime", "a1", "av1", "b1", "bv1"]])
                 else:
                     logger.error("No L trigger for symbol {}, hedge {}.".format(sym, param["hedge"]))
@@ -326,12 +348,14 @@ if __name__ == "__main__":
 
             if len(data_S) > 0:
                 df_S = pd.concat(data_S)
-                match_func = partial(bid_match, max_ntl, 20)
+                # match_func = partial(bid_match, 5 * max_ntl if args.ratelimit > 0 else max_ntl, 20)
+                match_func = partial(bid_match, float("inf"), 20)
                 match_S = df_S.apply(match_func, axis=1)
                 df_S["trigger_ntl"] = match_S.str[0]
                 df_S["trigger_pnl"] = match_S.str[1]
-                df_S["trigger_bps"] = df_S["trigger_pnl"].div(df_S["trigger_ntl"]) * 1e4
-                df_S_trigger = df_S.loc[(df_S.trigger_ntl >= min_ntl) & (df_S.trigger_bps >= entry)]
+                df_S["trigger_fees"] = df_S["trigger_ntl"] * bps_gas_fees[dex] / 1e4 + dollar_gas_fees[dex]
+                df_S["trigger_margin"] = (df_S["trigger_pnl"] - df_S["trigger_fees"]).div(df_S["trigger_ntl"]) * 1e4
+                df_S_trigger = df_S.loc[df_S.trigger_margin >= args.trigger_margin]
 
                 if not df_S_trigger.empty:
                     df_S_trigger.rename(columns={"timestamp": "triggertime"}, inplace=True)
@@ -348,6 +372,14 @@ if __name__ == "__main__":
                     df_S_trade["symbol"] = sym.replace('-', '')
                     df_S_trade["hedge"] = param["hedge"].replace('-', '')
 
+                    if args.ratelimit > 0:
+                        df_S_trade.set_index("timestamp", inplace=True)
+                        trade_interval = int(blocktimes[dex] * args.ratelimit)
+                        indices = df_S_trade["trade_ntl"].resample(f"{trade_interval}s").agg(lambda x: np.nan if x.count() == 0 else x.idxmax()).values
+                        indices = indices[~pd.isnull(indices)]
+                        df_S_trade = df_S_trade.loc[indices]
+                        df_S_trade.reset_index(inplace=True)
+
                     trades.append(df_S_trade[["timestamp", "symbol", "hedge", "trade_ntl", "trade_pnl", "fees", "net_margin", "triggertime", "a1", "av1", "b1", "bv1"]])
                 else:
                     logger.error("No S trigger for symbol {}, hedge {}.".format(sym, param["hedge"]))
@@ -357,10 +389,12 @@ if __name__ == "__main__":
     if len(trades) > 0:
         df = pd.concat(trades)
 
-        symbolfilename, _ = args.symbolfilename.split('.')
-        tradefilename = "Sim_trades_{}_{}-{}.csv".format(
-            symbolfilename, start_date.replace('-', ''), end_date.replace('-', ''))
-        df.to_csv(rootdir / tradefilename, index=False)
+        tradefilename = "Sim_trades_{}_trigger{}_{}_{}.csv".format(
+            args.exchanges, args.trigger_margin, start_date, end_date)
+        if args.ratelimit > 0:
+            tradefilename = "Sim_trades_{}_{}blocktimes_{}_{}.csv".format(
+                args.exchanges, args.ratelimit, start_date, end_date)
+        df.to_csv(outputdir / tradefilename, index=False)
 
         df["date"] = df["timestamp"].dt.strftime("%Y-%m-%d")
 
@@ -379,11 +413,17 @@ if __name__ == "__main__":
         df_res["winRatio"] = df_res["winTrades"].div(df_res["trade"]) * 100.
 
 
-        summaryfilename = "Sim_summary_{}_{}-{}.csv".format(
-            symbolfilename, start_date.replace('-', ''), end_date.replace('-', ''))
-        df_res.to_csv(rootdir / summaryfilename, index=True)
+        summaryfilename = "Sim_summary_{}_trigger{}_{}_{}.csv".format(
+            args.exchanges, args.trigger_margin, start_date, end_date)
+        if args.ratelimit > 0:
+            summaryfilename = "Sim_summary_{}_trigger{}_{}blocktimes_{}_{}.csv".format(
+                args.exchanges, args.trigger_margin, args.ratelimit, start_date, end_date)
+        df_res.to_csv(outputdir / summaryfilename, index=True)
 
+        if not args.upload:
+            sys.exit(0)
 
+        logger.info(f"Uploading to {args.s3_bucket}/{args.s3_folder}")
         s3_client = boto3.client("s3")
         key = args.s3_folder + '/' + tradefilename
         try:
