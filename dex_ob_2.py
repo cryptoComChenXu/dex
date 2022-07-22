@@ -85,15 +85,15 @@ def get_data_date(sym: str, param: Dict, side: str, start: str, end: str, delay:
     t1 = f"t1 = select timestamp, {side}" + f", {side}".join(map(str, range(1, 10))) 
     t1 += f", {side}v"
     t1 += f", {side}v".join(map(str, range(1, 10)))
-    t1 += " from depth_table where timestamp>={}, timestamp<{}, symbol='{}', {}v1 < {}v2 < {}v3 order by timestamp".format(
-        start, end, sym.replace('-', ''), side, side, side)
+    t1 += " from depth_table where timestamp>={}, timestamp<{}, symbol='{}', {}v1 < {}v2 < {}v3, {}1>1e-8 order by timestamp".format(
+        start, end, sym.replace('-', ''), side, side, side, side)
 
     if symbol_reverse:
         t1 = "t1 = select timestamp"
         for i in range(1, n_levels + 1):
             t1 += f", 1.0 / {oppo_side}{i} as {side}{i}, {oppo_side}v{i} * {oppo_side}{i} as {side}v{i}"
-        t1 += " from depth_table where timestamp>={}, timestamp<{}, symbol='{}' order by timestamp".format(
-            start, end, sym.replace('-', ''))
+        t1 += " from depth_table where timestamp>={}, timestamp<{}, symbol='{}', {}1>1e-8 order by timestamp".format(
+            start, end, sym.replace('-', ''), oppo_side)
 
 
     s.run(t1)
@@ -149,89 +149,68 @@ def get_data_date(sym: str, param: Dict, side: str, start: str, end: str, delay:
 
     return df
 
-# def ask_match(maxd, n_levels, x):
-#     y = deepcopy(x)
-#     tot_vol, tot_pnl = 0., 0.
-#     for i in range(1, 6):
-#         if not y[f"a{i}"] * y["adjust"] <= y["b1"] * y["hedge_adjust"]:
-#             break
-
-#         for j in range(1, n_levels + 1):
-#             if not y[f"a{i}"] * y["adjust"] <= y[f"b{j}"] * y["hedge_adjust"]:
-#                 break
-
-#             siz = min(y[f"av{i}"], y[f"bv{j}"])
-#             vol = siz * (y[f"b{j}"] * y["hedge_adjust"] + y[f"a{i}"] * y["adjust"])
-#             pnl = siz * (y[f"b{j}"] * y["hedge_adjust"] - y[f"a{i}"] * y["adjust"])
-
-#             if tot_vol + vol <= maxd:
-#                 tot_vol += vol
-#                 tot_pnl += pnl
-
-#                 y[f"av{i}"] -= siz
-#                 y[f"bv{j}"] -= siz
-#             else:
-#                 vol = maxd - tot_vol
-#                 siz = vol / (y[f"b{j}"] * y["hedge_adjust"] + y[f"a{i}"] * y["adjust"])
-#                 pnl = siz * (y[f"b{j}"] * y["hedge_adjust"] - y[f"a{i}"] * y["adjust"])
-#                 tot_vol = maxd
-#                 tot_pnl += pnl
-
-#                 y[f"av{i}"] -= siz
-#                 y[f"bv{j}"] -= siz
-
-#                 break
-
-#     return tot_vol, tot_pnl
-
-# def bid_match(maxd, n_levels, x):
-
-#     y = deepcopy(x)
-#     tot_vol, tot_pnl = 0., 0.
-#     for i in range(1, 6):
-#         if not y[f"b{i}"] * y["adjust"] >= y["a1"] * y["hedge_adjust"]:
-#             break
-
-#         for j in range(1, n_levels + 1):
-#             if not y[f"b{i}"] * y["adjust"] >= y[f"a{j}"] * y["hedge_adjust"]:
-#                 break
-
-#             siz = min(y[f"bv{i}"], y[f"av{j}"])
-#             vol = siz * (y[f"b{i}"] * y["adjust"] + y[f"a{j}"] * y["hedge_adjust"])
-#             pnl = siz * (y[f"b{i}"] * y["adjust"] - y[f"a{j}"] * y["hedge_adjust"])
-
-#             if tot_vol + vol <= maxd:
-#                 tot_vol += vol
-#                 tot_pnl += pnl
-
-#                 y[f"bv{i}"] -= siz
-#                 y[f"av{j}"] -= siz
-#             else:
-#                 vol = maxd - tot_vol
-#                 siz = vol / (y[f"b{i}"] * y["adjust"] + y[f"a{j}"] * y["hedge_adjust"])
-#                 pnl = siz * (y[f"b{i}"] * y["adjust"] - y[f"a{j}"] * y["hedge_adjust"])
-#                 tot_vol = maxd
-#                 tot_pnl += pnl
-
-#                 y[f"bv{i}"] -= siz
-#                 y[f"av{j}"] -= siz
-
-#                 break
-
-#     return tot_vol, tot_pnl
-
-
-def ask_match(maxd, n_levels, x):
+def ask_trade(x):
     y = deepcopy(x)
-    best_siz, best_vol, best_pnl = 0., 0., 0.
+
+    level = y["trigger_level_trigger"]
+
+    cur_siz = y[f"av{level}"]
+    cur_vol = cur_siz * y[f"a{level}"] * y["adjust"]
+    cur_vol_trigger = cur_siz * y[f"a{level}_trigger"] * y["adjust_trigger"]
+
+    hedge_siz, hedge_vol = 0., 0.
+    for j in range(1, 21):
+        if not cur_siz > 0: break
+        
+        siz = min(cur_siz, y[f"bv{j}"])
+        cur_siz -= siz
+
+        hedge_siz += siz
+        hedge_vol += siz * y[f"b{j}"] * y["hedge_adjust"]
+
+    if cur_siz > 0:
+        return 0, 0, 0
+
+    pnl = hedge_vol - cur_vol
+    slip = (cur_vol / cur_vol_trigger - 1.0) * 1e4
+    return hedge_siz, hedge_vol, pnl, slip
+
+def bid_trade(x):
+    y = deepcopy(x)
+    level = y["trigger_level_trigger"]
+
+    cur_siz = y[f"bv{level}"]
+    cur_vol = cur_siz * y[f"b{level}"] * y["adjust"]
+    cur_vol_trigger = cur_siz * y[f"b{level}_trigger"] * y["adjust_trigger"]
+
+    hedge_siz, hedge_vol = 0., 0.
+    for j in range(1, 21):
+        if not cur_siz > 0: break
+
+        siz = min(cur_siz, y[f"av{j}"])
+        cur_siz -= siz
+
+        hedge_siz += siz
+        hedge_vol += siz * y[f"a{j}"] * y["hedge_adjust"]
+
+    if cur_siz > 0:
+        return 0, 0, 0
+
+    pnl = cur_vol - hedge_vol
+    slip = (1.0 - cur_vol / cur_vol_trigger) * 1e4
+    return hedge_siz, hedge_vol, pnl, slip
+
+def ask_trigger(x):
+    y = deepcopy(x)
+    best_siz, best_vol, best_pnl, best_level = 0., 0., 0., 0
     for i in range(1, int(y["ob_levels"]) + 1):
         cur_siz = y[f"av{i}"]
         cur_vol = cur_siz * y[f"a{i}"] * y["adjust"]
 
-        if cur_vol > maxd: break
+        if not y[f"a{i}"] > 1e-8: break
 
         hedge_siz, hedge_vol = 0., 0.
-        for j in range(1, n_levels + 1):
+        for j in range(1, 21):
             if not cur_siz > 0: break
             
             siz = min(cur_siz, y[f"bv{j}"])
@@ -242,21 +221,22 @@ def ask_match(maxd, n_levels, x):
 
         pnl = hedge_vol - cur_vol
         if (not (hedge_siz < y[f"av{i}"])) and (pnl > best_pnl):
-            best_siz, best_vol, best_pnl = hedge_siz, cur_vol, pnl
+            best_siz, best_vol, best_pnl, best_level = hedge_siz, cur_vol, pnl, i
 
-    return best_siz, best_vol, best_pnl
+    return best_siz, best_vol, best_pnl, best_level
 
-def bid_match(maxd, n_levels, x):
+def bid_trigger(x):
     y = deepcopy(x)
-    best_siz, best_vol, best_pnl = 0., 0., 0
+    best_siz, best_vol, best_pnl, best_level = 0., 0., 0., 0
     for i in range(1, int(y["ob_levels"]) + 1):
         cur_siz = y[f"bv{i}"]
+
+        if not y[f"b{i}"] > 1e-8: break
+
         cur_vol = cur_siz * y[f"b{i}"] * y["adjust"]
 
-        if cur_vol > maxd: break
-
         hedge_siz, hedge_vol = 0., 0.
-        for j in range(1, n_levels + 1):
+        for j in range(1, 21):
             if not cur_siz > 0: break
 
             siz = min(cur_siz, y[f"av{j}"])
@@ -267,9 +247,9 @@ def bid_match(maxd, n_levels, x):
 
         pnl = cur_vol - hedge_vol
         if (not (hedge_siz < y[f"bv{i}"])) and (pnl > best_pnl):
-            best_siz, best_vol, best_pnl = hedge_siz, cur_vol, pnl
+            best_siz, best_vol, best_pnl, best_level = hedge_siz, cur_vol, pnl, i
 
-    return best_siz, best_vol, best_pnl
+    return best_siz, best_vol, best_pnl, best_level
 
 
 def calc_dates(start, end):
@@ -336,8 +316,9 @@ if __name__ == "__main__":
     parser.add_argument("--start", nargs="?", type=str, default="2022-07-03", dest="start", help="")
     parser.add_argument("--end", nargs="?", type=str, default="2022-07-05", dest="end", help="")
     parser.add_argument("--blocktimedelay", nargs="?", type=int, default=1, dest="blocktimedelay", help="")
+    parser.add_argument("--ratio", nargs="?", type=float, default=1.0, dest="ratio", help="")
     parser.add_argument("--ratelimit", nargs="?", type=int, default=0, dest="ratelimit", help="limit the trades in n seconds")
-    parser.add_argument("--trigger_margins", nargs="*", type=int, default=[1,2,3,4,5,6,7,8,9,10,15,20], dest="trigger_margins", help="")
+    parser.add_argument("--trigger_margins", nargs="*", type=int, default=[0, 1,2,3,4,5,6,7,8,9,10,15,20], dest="trigger_margins", help="")
     parser.add_argument("--eod", action="store_true", dest="eod", help="")
     parser.add_argument("--download", action="store_true", dest="download", help="")
 
@@ -370,15 +351,18 @@ if __name__ == "__main__":
     q2 = 'depth_table = loadTable("dfs://tick_depth", "depths")'
     s.run(q2)
 
-    now = datetime.utcnow()
-    prev_time = now - timedelta(hours=1)
-    start_date = prev_time.strftime("%Y-%m-%dT%H")
-    end_date = now.strftime("%Y-%m-%dT%H")
+    start_date, end_date = args.start, args.end
+
+    if args.start == "":
+        now = datetime.utcnow()
+        prev_time = now - timedelta(hours=1)
+        start_date = prev_time.strftime("%Y-%m-%dT%H")
+        end_date = now.strftime("%Y-%m-%dT%H")
+
     starts, ends = [start_date.replace('-', '.') + ":00:00"], [end_date.replace('-', '.') + ":00:00"]
 
     if args.eod:
-        start_date, end_date = args.start, args.end
-        if start_date == "":
+        if args.start == "":
             start_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
             end_date = now.strftime("%Y-%m-%d")
 
@@ -399,11 +383,12 @@ if __name__ == "__main__":
                     if not df_L.empty:
                         df_L["DEX"] = dex
                         df_L["ob_levels"] = df_L["DEX"].map(ob_levels)
-                        match_func_L = partial(ask_match, float("inf"), 20)
-                        match_L = df_L.apply(match_func_L, axis=1)
+                        # match_func_L = partial(ask_match, float("inf"), 20)
+                        match_L = df_L.apply(ask_trigger, axis=1)
                         df_L["trigger_siz"] = match_L.str[0]
                         df_L["trigger_ntl"] = match_L.str[1]
                         df_L["trigger_pnl"] = match_L.str[2]
+                        df_L["trigger_level"] = match_L.str[3]
                         df_L["trigger_fees"] = dollar_gas_fees[dex]
                         df_L["trigger_margin"] = (df_L["trigger_pnl"] - df_L["trigger_fees"]).div(df_L["trigger_ntl"]) * 1e4
                         df_L["symbol"] = sym.replace('-', '')
@@ -415,11 +400,12 @@ if __name__ == "__main__":
                     if not df_S.empty:
                         df_S["DEX"] = dex
                         df_S["ob_levels"] = df_S["DEX"].map(ob_levels)
-                        match_func_S = partial(bid_match, float("inf"), 20)
-                        match_S = df_S.apply(match_func_S, axis=1)
+                        # match_func_S = partial(bid_match, float("inf"), 20)
+                        match_S = df_S.apply(bid_trigger, axis=1)
                         df_S["trigger_siz"] = match_S.str[0]
                         df_S["trigger_ntl"] = match_S.str[1]
                         df_S["trigger_pnl"] = match_S.str[2]
+                        df_S["trigger_level"] = match_S.str[3]
                         df_S["trigger_fees"] = dollar_gas_fees[dex]
                         df_S["trigger_margin"] = (df_S["trigger_pnl"] - df_S["trigger_fees"]).div(df_S["trigger_ntl"]) * 1e4
                         df_S["symbol"] = sym.replace('-', '')
@@ -441,11 +427,23 @@ if __name__ == "__main__":
         df_S = pd.read_csv(shortdatafilename, parse_dates=["timestamp", "adjust_timestamp"])
 
 
+    pnl_dict = defaultdict(pd.Series)
+
+    results_dict = defaultdict(pd.DataFrame)
+    trades_dict = defaultdict(pd.DataFrame)
+
     for margin in args.trigger_margins:
         logger.info(f"Test margin {margin}bps ...")
 
-        df_L_trigger = df_L.loc[df_L.trigger_margin >= margin]
-        df_S_trigger = df_S.loc[df_S.trigger_margin >= margin]
+        if args.download and len(data_L) == 0:
+            df_L_trigger = pd.DataFrame()
+        else:
+            df_L_trigger = df_L.loc[df_L.trigger_margin >= margin]
+
+        if args.download and len(data_S) == 0:
+            df_S_trigger = pd.DataFrame()
+        else:
+            df_S_trigger = df_S.loc[df_S.trigger_margin >= margin]
 
         trades = []
 
@@ -458,15 +456,17 @@ if __name__ == "__main__":
             df_L.sort_values("timestamp", inplace=True)
             df_L_trade = pd.merge_asof(df_L_trigger, df_L, on="timestamp", by=["symbol", "hedge"], direction="forward", suffixes=("_trigger", ""))
             df_L_trade["ob_levels"] = df_L_trade["DEX_trigger"].map(ob_levels)
-            match_func_L = partial(ask_match, float("inf"), 20)
-            trade_L = df_L_trade.apply(match_func_L, axis=1)
+            trade_L = df_L_trade.apply(ask_trade, axis=1)
             df_L_trade["trade_siz"]  = trade_L.str[0]
             df_L_trade["trade_ntl"]  = trade_L.str[1]
             df_L_trade["trade_pnl"]  = trade_L.str[2]
+            df_L_trade["dex_slip"]   = trade_L.str[3]
             df_L_trade["gross_margin"] = df_L_trade["trade_pnl"].div(df_L_trade["trade_ntl"]) * 1e4
             df_L_trade["fees"] = df_L_trade["DEX_trigger"].map(dollar_gas_fees)
-            df_L_trade["net_margin"] = df_L_trade.apply(lambda x: (x["trade_pnl"] - x["fees"]) / x["trade_ntl"] if x["trade_ntl"] > 0 else np.nan, axis=1) 
-            trades.append(df_L_trade[["timestamp", "symbol", "hedge", "trade_ntl", "trade_pnl", "fees", "net_margin", "triggertime", 
+            df_L_trade["net_margin"] = df_L_trade.apply(lambda x: (x["trade_pnl"] - x["fees"]) / x["trade_ntl"] * 1e4 if x["trade_ntl"] > 0 else np.nan, axis=1) 
+
+            df_L_trade_exec = df_L_trade.loc[df_L_trade["dex_slip"] < df_L_trade["trigger_margin_trigger"] * (1. - args.ratio)]
+            trades.append(df_L_trade_exec[["timestamp", "symbol", "hedge", "trade_ntl", "trade_pnl", "fees", "net_margin", "triggertime", 
                 "a1", "av1", "b1", "bv1", "a1_trigger", "av1_trigger", "b1_trigger", "bv1_trigger"]])
 
         if not df_S_trigger.empty:
@@ -478,20 +478,24 @@ if __name__ == "__main__":
             df_S.sort_values("timestamp", inplace=True)
             df_S_trade = pd.merge_asof(df_S_trigger, df_S, on="timestamp", by=["symbol", "hedge"], direction="forward", suffixes=("_trigger", ""))
             df_S_trade["ob_levels"] = df_S_trade["DEX_trigger"].map(ob_levels)
-            match_func_S = partial(bid_match, float("inf"), 20)
-            trade_S = df_S_trade.apply(match_func_S, axis=1)
+            trade_S = df_S_trade.apply(bid_trade, axis=1)
             df_S_trade["trade_siz"]  = trade_S.str[0]
             df_S_trade["trade_ntl"]  = trade_S.str[1]
             df_S_trade["trade_pnl"]  = trade_S.str[2]
+            df_S_trade["dex_slip"]   = trade_S.str[3]
             df_S_trade["gross_margin"] = df_S_trade["trade_pnl"].div(df_S_trade["trade_ntl"]) * 1e4
             df_S_trade["fees"] = df_S_trade["DEX_trigger"].map(dollar_gas_fees)
-            df_S_trade["net_margin"] = df_S_trade.apply(lambda x: (x["trade_pnl"] - x["fees"]) / x["trade_ntl"] if x["trade_ntl"] > 0 else np.nan, axis=1) 
-            trades.append(df_S_trade[["timestamp", "symbol", "hedge", "trade_ntl", "trade_pnl", "fees", "net_margin", "triggertime", 
+            df_S_trade["net_margin"] = df_S_trade.apply(lambda x: (x["trade_pnl"] - x["fees"]) / x["trade_ntl"] * 1e4 if x["trade_ntl"] > 0 else np.nan, axis=1) 
+
+            df_S_trade_exec = df_S_trade.loc[df_S_trade["dex_slip"] < df_S_trade["trigger_margin_trigger"] * (1. - args.ratio)]
+            trades.append(df_S_trade_exec[["timestamp", "symbol", "hedge", "trade_ntl", "trade_pnl", "fees", "net_margin", "triggertime", 
                 "a1", "av1", "b1", "bv1", "a1_trigger", "av1_trigger", "b1_trigger", "bv1_trigger"]])
 
 
         if len(trades) > 0:
             df = pd.concat(trades)
+
+            trades_dict[margin] = df
 
             tradefilename = outputdir / "Sim_trades_{}_trigger{}_{}_{}.csv".format(
                 args.exchange, margin, start_date, end_date)
@@ -509,6 +513,8 @@ if __name__ == "__main__":
                 winTrades=pd.NamedAgg(column="net_margin", aggfunc=lambda x: (x > 0).sum())
             )
 
+            pnl_dict[margin] = df_res["gross_pnl"] - df_res["fees"]
+
 
             df_res["gross_margin"] = df_res["gross_pnl"].div(df_res["notional"]) * 1e4
             df_res["net_margin"] = (df_res["gross_pnl"] - df_res["fees"]).div(df_res["notional"]) * 1e4
@@ -519,3 +525,35 @@ if __name__ == "__main__":
                 args.exchange, margin, start_date, end_date)
             logger.info(f"Dump summary info to {summaryfilename} ...")
             df_res.to_csv(summaryfilename, index=True)
+
+            results_dict[margin] = df_res
+
+    df_pnl = pd.DataFrame(pnl_dict)
+
+    df_pnl_max = df_pnl.max(axis=1)
+    df_pnl_idxmax = df_pnl.idxmax(axis=1)
+
+    best_results = []
+    best_trades = []
+    for idx in df_pnl_idxmax.index:
+        col = df_pnl_idxmax.loc[idx]
+        df = results_dict[col]
+        dft = trades_dict[col]
+        best_results.append(df.loc[df.index == idx])
+        best_trades.append(dft.loc[(dft.symbol == idx[1]) & (dft.hedge == idx[2])])
+
+    df_best = pd.concat(best_results)
+    dft_best = pd.concat(best_trades)
+
+    df_best["Net PnL"] = df_pnl_max
+    df_best["Threshold"] = df_pnl_idxmax
+
+    summaryfilename = outputdir / "Sim_summary_{}_{}_{}.csv".format(
+        args.exchange, start_date, end_date)
+    logger.info(f"Dump summary info to {summaryfilename} ...")
+    df_best.to_csv(summaryfilename, index=True)
+
+    tradesfilename = outputdir / "Sim_trades_{}_{}_{}.csv".format(
+        args.exchange, start_date, end_date)
+    logger.info(f"Dump summary info to {tradesfilename} ...")
+    dft_best.to_csv(tradesfilename, index=True)
